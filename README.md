@@ -108,6 +108,20 @@ graph TD
 
 ---
 
+## What's New in v6.0
+
+- RAG Conversation Memory: persistent, ChromaDB-backed memory for storing scan outputs, vulnerability artifacts, and metadata for semantic retrieval across sessions.
+- MCP Tools for Memory: new MCP endpoints and tools (memory_store, memory_query, memory_stats, memory_history, memory_vulnerabilities) to let agents and clients interact with memory programmatically.
+- Automatic CUDA encoder selection: encoder will auto-detect CUDA-capable GPUs, honor `HEXSTRIKE_CUDA_DEVICE` for multi-GPU setups, and fall back to CPU when incompatible. Use `HEXSTRIKE_ENCODER_DEVICE=cpu` to force CPU.
+- NumPy compatibility shim & dependency guidance: to avoid runtime errors with NumPy 2.x, we recommend `numpy<2.0` when using ChromaDB and sentence-transformers.
+- Telemetry & offline-friendly defaults: chromadb telemetry is disabled by default to avoid noisy PostHog failures in air-gapped environments.
+- Improved logging & graceful degradation: encoder initialization and GPU compatibility issues produce clear, actionable guidance in logs.
+
+These changes are backward-compatible: if `chromadb` or `sentence-transformers` are not installed, the server continues to operate without conversation memory.
+
+---
+
+
 ## Installation
 
 ### Quick Setup to Run the hexstrike MCPs Server
@@ -118,6 +132,9 @@ git clone https://github.com/0x4m4/hexstrike-ai.git
 cd hexstrike-ai
 
 # 2. Create virtual environment
+```bash
+python -m venv hexstrike_env
+```
 python3 -m venv hexstrike-env
 source hexstrike-env/bin/activate  # Linux/Mac
 # hexstrike-env\Scripts\activate   # Windows
@@ -575,6 +592,49 @@ Configure VS Code settings in `.vscode/settings.json`:
 | **Dashboard** | `GET /api/processes/dashboard` | Live monitoring dashboard |
 
 ---
+
+### Conversation Memory Endpoints (RAG)
+
+These endpoints are available when `chromadb` and `sentence-transformers` are installed. If those packages are missing the server will continue to operate but memory endpoints will return a 503 status with an explanatory message.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/memory/health` | GET | Return memory availability, encoder device, and missing dependencies |
+| `/api/memory/stats` | GET | High-level stats: total scans, total vulnerabilities, unique targets |
+| `/api/memory/store` | POST | Store a scan into memory. Body: { target, tool, findings, vulnerabilities, metadata, timestamp (optional) } |
+| `/api/memory/query` | POST | Semantic query over stored scans. Body: { query, limit (optional) } |
+| `/api/memory/history` | GET | Get historical scans for a target: ?target=example.com |
+| `/api/memory/vulnerabilities` | GET | Retrieve vulnerability patterns. Optional `?type=` filter |
+
+Example: store a scan
+
+```json
+POST /api/memory/store
+{
+  "target": "example.com",
+  "tool": "nuclei",
+  "findings": [ { "summary": "Found open /admin" } ],
+  "vulnerabilities": [ { "type": "sqli", "severity": "high", "description": "Blind SQLi" } ],
+  "metadata": { "scan_options": "-t 20" }
+}
+```
+
+Example: query memory
+
+```json
+POST /api/memory/query
+{
+  "query": "recent sql injection findings on example.com",
+  "limit": 5
+}
+```
+
+Environment variables that affect encoder behavior
+
+- `HEXSTRIKE_ENCODER_DEVICE` - set to `cpu` or `cuda` to force behavior. Default: auto-detect.
+- `HEXSTRIKE_CUDA_DEVICE` - integer index for multi-GPU systems (e.g. `0`, `1`). Default: `0` when a GPU is detected.
+- `CHROMADB_DISABLE_TELEMETRY` - defaulted to `1` by the server to prevent posthog telemetry noise.
+
 
 ## Usage Examples
 When writing your prompt, you generally can't start with just a simple "i want you to penetration test site X.com" as the LLM's are generally setup with some level of ethics. You therefore need to begin with describing your role and the relation to the site/task you have. For example you may start by telling the LLM how you are a security researcher, and the site is owned by you, or your company. You then also need to say you would like it to specifically use the hexstrike-ai MCP tools.
