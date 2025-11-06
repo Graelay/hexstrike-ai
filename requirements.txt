@@ -27,6 +27,14 @@ webdriver-manager>=4.0.0,<5.0.0 # ChromeDriver management (referenced in code)
 aiohttp>=3.8.0,<4.0.0           # Async HTTP (aiohttp import)
 
 # ============================================================================
+# MEMORY & RAG SYSTEM (OPTIONAL BUT RECOMMENDED)
+# ============================================================================
+chromadb>=0.4.24,<0.5.0         # Conversation memory vector store (chromadb import)
+sentence-transformers>=2.2.2,<3.0.0  # Embedding encoder for RAG (SentenceTransformer import)
+numpy>=1.24.0,<2.0.0           # Required for chromadb compatibility (pin <2.0 to avoid removed aliases)
+# torch>=2.1.0,<3.0.0           # Optional GPU acceleration for embeddings
+
+# ============================================================================
 # PROXY & TESTING (ACTUALLY USED)
 # ============================================================================
 mitmproxy>=9.0.0,<11.0.0        # HTTP proxy (mitmproxy imports)

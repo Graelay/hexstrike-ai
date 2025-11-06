@@ -31,6 +31,7 @@ import hashlib
 import pickle
 import base64
 import queue
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
@@ -64,6 +65,37 @@ import mitmproxy
 from mitmproxy import http as mitmhttp
 from mitmproxy.tools.dump import DumpMaster
 from mitmproxy.options import Options as MitmOptions
+
+# Disable chromadb telemetry early to avoid noisy PostHog failures in offline environments
+os.environ.setdefault("CHROMADB_DISABLE_TELEMETRY", "1")
+
+# NumPy compatibility shim for libraries that expect legacy aliases removed in NumPy 2.0
+try:
+    import numpy as np
+    # Provide legacy attribute aliases if missing (chromadb and others may expect them)
+    if not hasattr(np, 'float_'):
+        np.float_ = np.float64
+    if not hasattr(np, 'int_'):
+        np.int_ = np.int64
+    if not hasattr(np, 'uint'):
+        np.uint = np.uint64
+except Exception:
+    np = None
+
+# Optional RAG dependencies
+try:
+    import chromadb
+    from chromadb.config import Settings
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    chromadb = None
+    Settings = None
+    SentenceTransformer = None
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 # ============================================================================
 # LOGGING CONFIGURATION (MUST BE FIRST)
@@ -2426,7 +2458,359 @@ class GracefulDegradation:
         """Check if operation is critical and requires fallback"""
         return operation in self.critical_operations
 
-# Global error handler and degradation manager instances
+# ============================================================================
+# CONVERSATION MEMORY & RAG SYSTEM (v6.1 ENHANCEMENT)
+# ============================================================================
+
+@dataclass
+class MemoryScanRecord:
+    """Structured scan payload for conversation memory."""
+
+    scan_id: str
+    timestamp: datetime
+    target: str
+    tool: str
+    findings: List[Dict[str, Any]] = field(default_factory=list)
+    vulnerabilities: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    embedding: Optional[List[float]] = None
+
+
+class HexStrikeMemoryManager:
+    """ChromaDB-backed RAG memory manager for HexStrike AI."""
+
+    def __init__(self, persist_directory: str = "./hexstrike_memory"):
+        self.logger = logging.getLogger("HexStrikeMemory")
+        self.persist_directory = persist_directory
+        self.encoder_lock = threading.Lock()
+        self.client = None
+        self.scans_collection = None
+        self.vulns_collection = None
+        self.encoder = None
+        self.encoder_device = "cpu"
+        self.failure_reason = ""
+        self.missing_dependencies: List[str] = []
+
+        if chromadb is None:
+            self.missing_dependencies.append("chromadb")
+        if SentenceTransformer is None:
+            self.missing_dependencies.append("sentence-transformers")
+
+        self.enabled = not self.missing_dependencies
+
+        if not self.enabled:
+            self.failure_reason = "Missing conversation memory dependencies"
+            self.logger.warning(
+                "Conversation memory disabled: missing %s",
+                ", ".join(self.missing_dependencies)
+            )
+            return
+
+        try:
+            os.makedirs(persist_directory, exist_ok=True)
+            self.client = chromadb.Client(Settings(
+                persist_directory=persist_directory,
+                anonymized_telemetry=False
+            ))
+            self.scans_collection = self.client.get_or_create_collection(
+                name="hexstrike_scans",
+                metadata={"description": "Historical tool scan results"}
+            )
+            self.vulns_collection = self.client.get_or_create_collection(
+                name="hexstrike_vulnerabilities",
+                metadata={"description": "Discovered vulnerability details"}
+            )
+
+            requested_device = self._select_encoder_device()
+            self.encoder, actual_device = self._initialize_encoder(requested_device)
+            self.encoder_device = actual_device
+
+            self.logger.info(
+                "✓ Conversation memory ready at %s (encoder: %s)",
+                persist_directory,
+                self.encoder_device
+            )
+        except Exception as exc:
+            self.enabled = False
+            self.failure_reason = str(exc)
+            self.logger.error("✗ Failed to initialize conversation memory: %s", exc)
+
+    def _select_encoder_device(self) -> str:
+        preferred = os.environ.get("HEXSTRIKE_ENCODER_DEVICE", "").strip().lower()
+
+        if preferred == "cpu":
+            return "cpu"
+
+        if preferred == "cuda":
+            device = self._detect_cuda_device()
+            if device:
+                return device
+            self.logger.warning("CUDA requested but unavailable; falling back to CPU")
+            return "cpu"
+
+        device = self._detect_cuda_device()
+        if device:
+            return device
+        return "cpu"
+
+    def _initialize_encoder(self, device: str):
+        if SentenceTransformer is None:
+            raise RuntimeError("sentence-transformers dependency missing")
+        try:
+            encoder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+            return encoder, device
+        except Exception as exc:
+            if device.startswith("cuda"):
+                self.logger.warning(
+                    "Encoder init on %s failed (%s); retrying on CPU",
+                    device,
+                    exc
+                )
+                self._log_cuda_guidance(None, exc)
+                encoder = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+                return encoder, "cpu"
+            raise
+
+    def _detect_cuda_device(self) -> Optional[str]:
+        if torch is None or not torch.cuda.is_available():
+            return None
+
+        device_env = os.environ.get("HEXSTRIKE_CUDA_DEVICE", "").strip()
+        try:
+            requested_index = int(device_env) if device_env else 0
+        except ValueError:
+            self.logger.warning("Invalid HEXSTRIKE_CUDA_DEVICE '%s'; defaulting to 0", device_env)
+            requested_index = 0
+
+        try:
+            device_count = torch.cuda.device_count()
+            if requested_index < 0 or requested_index >= device_count:
+                self.logger.warning(
+                    "Requested CUDA device %d not available (found %d); falling back to CPU",
+                    requested_index,
+                    device_count
+                )
+                return None
+
+            device_name = torch.cuda.get_device_name(requested_index)
+            capability = torch.cuda.get_device_capability(requested_index)
+            device_str = f"cuda:{requested_index}" if device_count > 1 or requested_index else "cuda"
+
+            try:
+                torch.zeros(1, device=device_str)
+            except Exception as exc:
+                self._log_cuda_guidance(capability, exc)
+                return None
+
+            self.logger.info(
+                "Using CUDA device %s (sm_%d%d)",
+                device_name,
+                capability[0],
+                capability[1]
+            )
+            return device_str
+        except Exception as exc:
+            self.logger.warning("CUDA detection failed: %s", exc)
+            return None
+
+    def _log_cuda_guidance(
+        self,
+        capability: Optional[Tuple[int, int]] = None,
+        exc: Optional[Exception] = None
+    ) -> None:
+        suffix = ""
+        if capability:
+            suffix += f" (detected sm_{capability[0]}{capability[1]})"
+        if exc:
+            suffix += f" :: {exc}"
+        self.logger.warning(
+            "GPU embedding disabled%s. Install a PyTorch build compiled with matching SM support (e.g. torch==2.1.2+cu118 for Tesla P100) or set HEXSTRIKE_ENCODER_DEVICE=cpu",
+            suffix
+        )
+
+    def _ensure_available(self) -> None:
+        if not self.enabled or not self.client or not self.scans_collection or not self.encoder:
+            missing = ", ".join(self.missing_dependencies) if self.missing_dependencies else "unavailable"
+            raise RuntimeError(f"Conversation memory unavailable ({missing})")
+
+    def _encode_text(self, text: str) -> List[float]:
+        self._ensure_available()
+        with self.encoder_lock:
+            vector = self.encoder.encode(text)
+        if hasattr(vector, "tolist"):
+            return vector.tolist()
+        return list(vector)
+
+    def _summarize_entries(self, entries: List[Any], max_items: int = 5) -> str:
+        summary = []
+        for entry in entries[:max_items]:
+            if isinstance(entry, dict):
+                snippet = entry.get("summary") or entry.get("description") or entry.get("content")
+                summary.append(snippet or json.dumps(entry)[:200])
+            else:
+                summary.append(str(entry)[:200])
+        return "; ".join(summary)
+
+    def _build_scan_document(self, record: MemoryScanRecord) -> str:
+        findings_text = self._summarize_entries(record.findings)
+        vuln_text = self._summarize_entries(record.vulnerabilities)
+        return (
+            f"Target: {record.target}\n"
+            f"Tool: {record.tool}\n"
+            f"Findings: {findings_text or 'None'}\n"
+            f"Vulnerabilities: {vuln_text or 'None'}"
+        )
+
+    def store_scan(self, record: MemoryScanRecord) -> bool:
+        try:
+            self._ensure_available()
+            document = self._build_scan_document(record)
+            embedding = self._encode_text(document)
+            record.embedding = embedding
+
+            self.scans_collection.add(
+                ids=[record.scan_id],
+                embeddings=[embedding],
+                documents=[document],
+                metadatas=[{
+                    "timestamp": record.timestamp.isoformat(),
+                    "target": record.target,
+                    "tool": record.tool,
+                    "finding_count": len(record.findings),
+                    "vuln_count": len(record.vulnerabilities),
+                    **({k: v for k, v in record.metadata.items() if k not in {"findings", "vulnerabilities"}}
+                       if record.metadata else {})
+                }]
+            )
+
+            for idx, vuln in enumerate(record.vulnerabilities):
+                vuln_id = f"{record.scan_id}_vuln_{idx}"
+                vuln_text = self._summarize_entries([vuln], max_items=1)
+                vuln_embedding = self._encode_text(vuln_text)
+                self.vulns_collection.add(
+                    ids=[vuln_id],
+                    embeddings=[vuln_embedding],
+                    documents=[vuln_text],
+                    metadatas=[{
+                        "scan_id": record.scan_id,
+                        "target": record.target,
+                        "type": vuln.get("type", "unknown") if isinstance(vuln, dict) else "unknown",
+                        "severity": vuln.get("severity", "unknown") if isinstance(vuln, dict) else "unknown"
+                    }]
+                )
+
+            self.logger.info("✓ Stored scan %s in conversation memory", record.scan_id)
+            return True
+        except Exception as exc:
+            self.logger.error("✗ Failed to store scan %s: %s", getattr(record, "scan_id", "unknown"), exc)
+            return False
+
+    def query_scans(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        try:
+            self._ensure_available()
+            query_embedding = self._encode_text(query)
+            results = self.scans_collection.query(
+                query_embeddings=[query_embedding],
+                n_results=limit
+            )
+
+            ids = (results or {}).get("ids") or [[]]
+            distances = (results or {}).get("distances") or [[]]
+            metadatas = (results or {}).get("metadatas") or [[]]
+            documents = (results or {}).get("documents") or [[]]
+
+            similar = []
+            for idx, scan_id in enumerate(ids[0]):
+                distance = distances[0][idx] if idx < len(distances[0]) else None
+                metadata = metadatas[0][idx] if idx < len(metadatas[0]) else {}
+                doc = documents[0][idx] if idx < len(documents[0]) else ""
+                similar.append({
+                    "scan_id": scan_id,
+                    "similarity": 1.0 - distance if distance is not None else 0.0,
+                    "metadata": metadata or {},
+                    "summary": doc or ""
+                })
+            return similar
+        except Exception as exc:
+            self.logger.error("✗ Failed to query conversation memory: %s", exc)
+            return []
+
+    def target_history(self, target: str) -> List[Dict[str, Any]]:
+        try:
+            self._ensure_available()
+            results = self.scans_collection.get(where={"target": target})
+            ids = (results or {}).get("ids") or []
+            metadatas = (results or {}).get("metadatas") or []
+            documents = (results or {}).get("documents") or []
+
+            history = []
+            for idx, scan_id in enumerate(ids):
+                metadata = metadatas[idx] if idx < len(metadatas) else {}
+                doc = documents[idx] if idx < len(documents) else ""
+                history.append({
+                    "scan_id": scan_id,
+                    "metadata": metadata or {},
+                    "summary": doc or ""
+                })
+            return history
+        except Exception as exc:
+            self.logger.error("✗ Failed to fetch history for %s: %s", target, exc)
+            return []
+
+    def vulnerability_patterns(self, vuln_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        try:
+            self._ensure_available()
+            where_clause = {"type": vuln_type} if vuln_type else None
+            results = self.vulns_collection.get(where=where_clause, limit=200)
+            ids = (results or {}).get("ids") or []
+            metadatas = (results or {}).get("metadatas") or []
+            documents = (results or {}).get("documents") or []
+
+            patterns = []
+            for idx, vuln_id in enumerate(ids):
+                metadata = metadatas[idx] if idx < len(metadatas) else {}
+                doc = documents[idx] if idx < len(documents) else ""
+                patterns.append({
+                    "id": vuln_id,
+                    "metadata": metadata or {},
+                    "description": doc or ""
+                })
+            return patterns
+        except Exception as exc:
+            self.logger.error("✗ Failed to retrieve vulnerability patterns: %s", exc)
+            return []
+
+    def stats(self) -> Dict[str, Any]:
+        try:
+            self._ensure_available()
+            total_scans = self.scans_collection.count()
+            total_vulns = self.vulns_collection.count()
+            results = self.scans_collection.get()
+            metadatas = (results or {}).get("metadatas") or []
+            targets = {metadata.get("target") for metadata in metadatas if metadata and metadata.get("target")}
+            return {
+                "enabled": True,
+                "total_scans": total_scans,
+                "total_vulnerabilities": total_vulns,
+                "unique_targets": len(targets),
+                "targets": sorted(targets)
+            }
+        except Exception as exc:
+            self.logger.error("✗ Failed to calculate conversation memory stats: %s", exc)
+            return {"enabled": False, "error": str(exc)}
+
+    def status(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "persist_directory": self.persist_directory,
+            "encoder_device": self.encoder_device if self.enabled else None,
+            "missing_dependencies": self.missing_dependencies,
+            "failure_reason": self.failure_reason
+        }
+
+
+# Global managers
+memory_manager = HexStrikeMemoryManager()
 error_handler = IntelligentErrorHandler()
 degradation_manager = GracefulDegradation()
 
@@ -7006,6 +7390,85 @@ class EnhancedCommandExecutor:
 # DUPLICATE CLASSES REMOVED - Using the first definitions above
 # ============================================================================
 
+
+def maybe_record_scan_memory(
+    tool_name: str,
+    target: str,
+    command: str,
+    request_payload: Dict[str, Any],
+    execution_result: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Persist scan details into conversation memory when requested."""
+
+    if not request_payload.get("record_memory"):
+        return None
+
+    if not memory_manager.enabled:
+        return {
+            "success": False,
+            "enabled": False,
+            "missing_dependencies": memory_manager.missing_dependencies,
+            "reason": "conversation_memory_disabled"
+        }
+
+    scan_id = request_payload.get("scan_id")
+    if not scan_id:
+        nonce_source = f"{tool_name}|{target}|{command}|{time.time()}"
+        scan_id = f"{tool_name}-{hashlib.sha1(nonce_source.encode('utf-8')).hexdigest()[:10]}"
+
+    try:
+        stdout_snippet = (execution_result.get("stdout") or "")[:4000]
+        stderr_snippet = (execution_result.get("stderr") or "")[:2000]
+
+        findings: List[Dict[str, Any]] = []
+        if stdout_snippet:
+            findings.append({"channel": "stdout", "content": stdout_snippet})
+        if stderr_snippet:
+            findings.append({"channel": "stderr", "content": stderr_snippet})
+
+        vulnerabilities = request_payload.get("vulnerabilities") or []
+        if not isinstance(vulnerabilities, list):
+            vulnerabilities = [vulnerabilities]
+
+        metadata = {
+            "command": command,
+            "execution_time": execution_result.get("execution_time"),
+            "return_code": execution_result.get("return_code"),
+            "timed_out": execution_result.get("timed_out"),
+            "success": execution_result.get("success"),
+            "parameters": {
+                key: value
+                for key, value in request_payload.items()
+                if key not in {"record_memory", "scan_id", "vulnerabilities"}
+            }
+        }
+
+        record = MemoryScanRecord(
+            scan_id=scan_id,
+            timestamp=datetime.utcnow(),
+            target=target,
+            tool=tool_name,
+            findings=findings,
+            vulnerabilities=vulnerabilities,
+            metadata=metadata
+        )
+
+        stored = memory_manager.store_scan(record)
+        return {
+            "success": stored,
+            "enabled": True,
+            "scan_id": scan_id
+        }
+    except Exception as exc:
+        logger.error("Memory recording failed for %s: %s", tool_name, exc)
+        return {
+            "success": False,
+            "enabled": True,
+            "scan_id": scan_id,
+            "error": str(exc)
+        }
+
+
 # ============================================================================
 # AI-POWERED EXPLOIT GENERATION SYSTEM (v6.0 ENHANCEMENT)
 # ============================================================================
@@ -10366,6 +10829,9 @@ def nmap():
             result = execute_command(command)
 
         logger.info(f"📊 Nmap scan completed for {target}")
+        memory_meta = maybe_record_scan_memory("nmap", target, command, params, result)
+        if memory_meta is not None:
+            result["memory"] = memory_meta
         return jsonify(result)
 
     except Exception as e:
@@ -10418,6 +10884,9 @@ def gobuster():
             result = execute_command(command)
 
         logger.info(f"📊 Gobuster scan completed for {url}")
+        memory_meta = maybe_record_scan_memory("gobuster", url, command, params, result)
+        if memory_meta is not None:
+            result["memory"] = memory_meta
         return jsonify(result)
 
     except Exception as e:
@@ -10474,6 +10943,9 @@ def nuclei():
             result = execute_command(command)
 
         logger.info(f"📊 Nuclei scan completed for {target}")
+        memory_meta = maybe_record_scan_memory("nuclei", target, command, params, result)
+        if memory_meta is not None:
+            result["memory"] = memory_meta
         return jsonify(result)
 
     except Exception as e:
@@ -10481,6 +10953,166 @@ def nuclei():
         return jsonify({
             "error": f"Server error: {str(e)}"
         }), 500
+
+# ============================================================================
+# CONVERSATION MEMORY API ENDPOINTS (v6.1 ENHANCEMENT)
+# ============================================================================
+
+
+@app.route("/api/memory/health", methods=["GET"])
+def memory_health():
+    """Return conversation memory availability status."""
+
+    status = memory_manager.status()
+    return jsonify({
+        "success": True,
+        "status": status,
+        "timestamp": datetime.now().isoformat()
+    })
+
+
+@app.route("/api/memory/stats", methods=["GET"])
+def memory_stats():
+    """Return high-level statistics for stored scan data."""
+
+    if not memory_manager.enabled:
+        return jsonify({
+            "success": False,
+            "error": "Conversation memory disabled",
+            "status": memory_manager.status()
+        }), 503
+
+    stats = memory_manager.stats()
+    stats["timestamp"] = datetime.now().isoformat()
+    stats["success"] = True
+    return jsonify(stats)
+
+
+@app.route("/api/memory/store", methods=["POST"])
+def memory_store_scan():
+    """Persist a scan into conversation memory."""
+
+    if not memory_manager.enabled:
+        return jsonify({
+            "success": False,
+            "error": "Conversation memory disabled",
+            "status": memory_manager.status()
+        }), 503
+
+    payload = request.get_json() or {}
+
+    target = payload.get("target")
+    tool = payload.get("tool")
+    if not target or not tool:
+        return jsonify({"error": "target and tool are required"}), 400
+
+    scan_id = payload.get("scan_id") or f"manual-{uuid.uuid4().hex[:12]}"
+    timestamp_value = payload.get("timestamp")
+    try:
+        timestamp = datetime.fromisoformat(timestamp_value) if timestamp_value else datetime.utcnow()
+    except ValueError:
+        return jsonify({"error": "Invalid timestamp format"}), 400
+
+    findings = payload.get("findings") or []
+    vulnerabilities = payload.get("vulnerabilities") or []
+    metadata = payload.get("metadata") or {}
+
+    if not isinstance(findings, list):
+        findings = [findings]
+    if not isinstance(vulnerabilities, list):
+        vulnerabilities = [vulnerabilities]
+    if not isinstance(metadata, dict):
+        return jsonify({"error": "metadata must be an object"}), 400
+
+    record = MemoryScanRecord(
+        scan_id=scan_id,
+        timestamp=timestamp,
+        target=target,
+        tool=tool,
+        findings=findings,
+        vulnerabilities=vulnerabilities,
+        metadata=metadata
+    )
+
+    stored = memory_manager.store_scan(record)
+    status_code = 200 if stored else 500
+    return jsonify({
+        "success": stored,
+        "scan_id": scan_id,
+        "timestamp": timestamp.isoformat()
+    }), status_code
+
+
+@app.route("/api/memory/query", methods=["POST"])
+def memory_query():
+    """Semantic search over stored scans."""
+
+    if not memory_manager.enabled:
+        return jsonify({
+            "success": False,
+            "error": "Conversation memory disabled",
+            "status": memory_manager.status()
+        }), 503
+
+    payload = request.get_json() or {}
+    query = payload.get("query")
+    limit = int(payload.get("limit", 5))
+
+    if not query:
+        return jsonify({"error": "query is required"}), 400
+
+    results = memory_manager.query_scans(query, max(1, min(limit, 25)))
+    return jsonify({
+        "success": True,
+        "results": results,
+        "timestamp": datetime.now().isoformat()
+    })
+
+
+@app.route("/api/memory/history", methods=["GET"])
+def memory_history():
+    """Return historical scans for a target."""
+
+    if not memory_manager.enabled:
+        return jsonify({
+            "success": False,
+            "error": "Conversation memory disabled",
+            "status": memory_manager.status()
+        }), 503
+
+    target = request.args.get("target")
+    if not target:
+        return jsonify({"error": "target parameter is required"}), 400
+
+    history = memory_manager.target_history(target)
+    return jsonify({
+        "success": True,
+        "target": target,
+        "history": history,
+        "timestamp": datetime.now().isoformat()
+    })
+
+
+@app.route("/api/memory/vulnerabilities", methods=["GET"])
+def memory_vulnerabilities():
+    """Retrieve stored vulnerability patterns."""
+
+    if not memory_manager.enabled:
+        return jsonify({
+            "success": False,
+            "error": "Conversation memory disabled",
+            "status": memory_manager.status()
+        }), 503
+
+    vuln_type = request.args.get("type")
+    patterns = memory_manager.vulnerability_patterns(vuln_type)
+    return jsonify({
+        "success": True,
+        "type": vuln_type,
+        "patterns": patterns,
+        "timestamp": datetime.now().isoformat()
+    })
+
 
 # ============================================================================
 # CLOUD SECURITY TOOLS

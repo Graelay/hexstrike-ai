@@ -21,6 +21,7 @@ import sys
 import os
 import argparse
 import logging
+import json
 from typing import Dict, Any, Optional
 import requests
 import time
@@ -275,6 +276,79 @@ def setup_mcp_server(hexstrike_client: HexStrikeClient) -> FastMCP:
         Configured FastMCP instance
     """
     mcp = FastMCP("hexstrike-ai-mcp")
+
+    # ========================================================================
+    # CONVERSATION MEMORY TOOLS
+    # ========================================================================
+
+    @mcp.tool()
+    def memory_health() -> Dict[str, Any]:
+        """Check conversation memory availability and configuration."""
+
+        return hexstrike_client.safe_get("api/memory/health")
+
+    @mcp.tool()
+    def memory_stats() -> Dict[str, Any]:
+        """Retrieve aggregate statistics for stored scan data."""
+
+        return hexstrike_client.safe_get("api/memory/stats")
+
+    @mcp.tool()
+    def memory_store(
+        target: str,
+        tool: str,
+        scan_id: str = "",
+        findings_json: str = "[]",
+        vulnerabilities_json: str = "[]",
+        metadata_json: str = "{}",
+        timestamp: str = ""
+    ) -> Dict[str, Any]:
+        """Persist a scan into HexStrike's conversation memory via API."""
+
+        if not target or not tool:
+            return {"success": False, "error": "target and tool are required"}
+
+        try:
+            findings = json.loads(findings_json or "[]")
+            vulnerabilities = json.loads(vulnerabilities_json or "[]")
+            metadata = json.loads(metadata_json or "{}")
+        except json.JSONDecodeError as decode_error:
+            return {"success": False, "error": f"Invalid JSON payload: {decode_error}"}
+
+        payload: Dict[str, Any] = {
+            "target": target,
+            "tool": tool,
+            "findings": findings,
+            "vulnerabilities": vulnerabilities,
+            "metadata": metadata
+        }
+
+        if scan_id:
+            payload["scan_id"] = scan_id
+        if timestamp:
+            payload["timestamp"] = timestamp
+
+        return hexstrike_client.safe_post("api/memory/store", payload)
+
+    @mcp.tool()
+    def memory_query(query: str, limit: int = 5) -> Dict[str, Any]:
+        """Query conversation memory for semantically similar scans."""
+
+        payload = {"query": query, "limit": limit}
+        return hexstrike_client.safe_post("api/memory/query", payload)
+
+    @mcp.tool()
+    def memory_history(target: str) -> Dict[str, Any]:
+        """Fetch historical scans for the specified target."""
+
+        return hexstrike_client.safe_get("api/memory/history", params={"target": target})
+
+    @mcp.tool()
+    def memory_vulnerabilities(vuln_type: str = "") -> Dict[str, Any]:
+        """List stored vulnerability patterns optionally filtered by type."""
+
+        params = {"type": vuln_type} if vuln_type else None
+        return hexstrike_client.safe_get("api/memory/vulnerabilities", params=params or {})
 
     # ============================================================================
     # CORE NETWORK SCANNING TOOLS

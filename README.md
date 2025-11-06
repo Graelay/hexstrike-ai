@@ -339,6 +339,28 @@ Configure VS Code settings in `.vscode/settings.json`:
 
 </details>
 
+### 🧠 RAG Conversation Memory (New)
+
+- **ChromaDB-Powered Vector Store** – Persistent conversation memory captures scan outputs, metadata, and vulnerability artifacts for later recall.
+- **Semantic Retrieval API** – Query prior engagements with sentence-transformer embeddings for instant context handoff across sessions.
+- **Target Histories & Patterns** – Retrieve per-target timelines and recurring vulnerability fingerprints to guide next actions.
+- **MCP Tooling Included** – `memory_store`, `memory_query`, and related tools let agents record and consume memory directly from VS Code or any MCP client.
+- **Configurable Persistence** – Memory directory defaults to `./hexstrike_memory` and respects `HEXSTRIKE_ENCODER_DEVICE` for CPU/GPU selection.
+- **Automatic CUDA Detection** – Prefers the first available GPU by default and honors `HEXSTRIKE_CUDA_DEVICE` for multi-GPU rigs.
+- **GPU/CPU Flexibility** – Falls back to CPU when CUDA init fails; set `HEXSTRIKE_ENCODER_DEVICE=cpu` to skip GPU checks entirely.
+
+#### GPU Compatibility Tips
+
+- PyTorch wheels newer than 2.2 drop support for legacy GPUs (sm_60 such as Tesla P100). Install a build compiled for your architecture, e.g.
+
+  ```bash
+  pip install --index-url https://download.pytorch.org/whl/cu118 \
+      torch==2.1.2+cu118 torchvision==0.16.2+cu118 torchaudio==2.1.2+cu118
+  ```
+
+- To pin a specific card, export `HEXSTRIKE_CUDA_DEVICE=<index>` (e.g. `HEXSTRIKE_CUDA_DEVICE=1`).
+- Export `HEXSTRIKE_ENCODER_DEVICE=cpu` before starting the server to run embeddings on the CPU without warnings.
+
 <details>
 <summary><b>🔐 Authentication & Password Security (12+ Tools)</b></summary>
 
