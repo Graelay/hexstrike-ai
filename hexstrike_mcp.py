@@ -5,13 +5,14 @@ HexStrike AI MCP Client - Enhanced AI Agent Communication Interface
 Enhanced with AI-Powered Intelligence & Automation
 🚀 Bug Bounty | CTF | Red Team | Security Research
 
-RECENT ENHANCEMENTS (v6.0):
+RECENT ENHANCEMENTS (v6.0G):
 ✅ Complete color consistency with reddish hacker theme
 ✅ Enhanced visual output with consistent styling
 ✅ Improved error handling and recovery systems
 ✅ FastMCP integration for seamless AI communication
 ✅ 100+ security tools with intelligent parameter optimization
 ✅ Advanced logging with colored output and emojis
+✅ RAG conversation memory with full MCP integration
 
 Architecture: MCP Client for AI agent communication with HexStrike server
 Framework: FastMCP integration for tool orchestration
@@ -5507,7 +5508,7 @@ def main():
         logger.debug("🔍 Debug logging enabled")
 
     # MCP compatibility: No banner output to avoid JSON parsing issues
-    logger.info(f"🚀 Starting HexStrike AI MCP Client v6.0")
+    logger.info(f"🚀 Starting HexStrike AI MCP Client v6.0G")
     logger.info(f"🔗 Connecting to: {args.server}")
 
     try:

@@ -1,4 +1,4 @@
-# HexStrike AI MCP Agents v6.0
+# HexStrike AI MCP Agents v6.0G
 #
 # INSTALLATION COMMANDS:
 # python3 -m venv hexstrike_env
@@ -50,7 +50,7 @@ bcrypt==4.0.1                   # Pin bcrypt version for passlib compatibility (
 # EXTERNAL SECURITY TOOLS (150+ Tools - Install separately)
 # ============================================================================
 #
-# HexStrike v6.0 integrates with 150+ external security tools that must be
+# HexStrike v6.0G integrates with 150+ external security tools that must be
 # installed separately from their official sources:
 #
 # 🔍 Network & Reconnaissance (25+ tools):

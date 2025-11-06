@@ -5,7 +5,7 @@ HexStrike AI - Advanced Penetration Testing Framework Server
 Enhanced with AI-Powered Intelligence & Automation
 🚀 Bug Bounty | CTF | Red Team | Security Research
 
-RECENT ENHANCEMENTS (v6.0):
+RECENT ENHANCEMENTS (v6.0G):
 ✅ Complete color consistency with reddish hacker theme
 ✅ Removed duplicate classes (PythonEnvironmentManager, CVEIntelligenceManager)
 ✅ Enhanced visual output with ModernVisualEngine
@@ -13,6 +13,8 @@ RECENT ENHANCEMENTS (v6.0):
 ✅ 100+ security tools with intelligent parameter optimization
 ✅ AI-driven decision engine for tool selection
 ✅ Advanced error handling and recovery systems
+✅ RAG conversation memory with ChromaDB + sentence-transformers
+✅ Automatic CUDA GPU detection with multi-device support
 
 Architecture: Two-script system (hexstrike_server.py + hexstrike_mcp.py)
 Framework: FastMCP integration for AI agent communication
@@ -9586,7 +9588,7 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "message": "HexStrike AI Tools API Server is operational",
-        "version": "6.0.0",
+        "version": "6.0G",
         "tools_status": tools_status,
         "all_essential_tools_available": all_essential_tools_available,
         "total_tools_available": sum(1 for tool, available in tools_status.items() if available),
@@ -11609,6 +11611,11 @@ def dirb():
         logger.info(f"📁 Starting Dirb scan: {url}")
         result = execute_command(command)
         logger.info(f"📊 Dirb scan completed for {url}")
+        
+        memory_meta = maybe_record_scan_memory("dirb", url, command, params, result)
+        if memory_meta is not None:
+            result["memory"] = memory_meta
+        
         return jsonify(result)
     except Exception as e:
         logger.error(f"💥 Error in dirb endpoint: {str(e)}")
@@ -11638,6 +11645,11 @@ def nikto():
         logger.info(f"🔬 Starting Nikto scan: {target}")
         result = execute_command(command)
         logger.info(f"📊 Nikto scan completed for {target}")
+        
+        memory_meta = maybe_record_scan_memory("nikto", target, command, params, result)
+        if memory_meta is not None:
+            result["memory"] = memory_meta
+        
         return jsonify(result)
     except Exception as e:
         logger.error(f"💥 Error in nikto endpoint: {str(e)}")
@@ -11671,6 +11683,11 @@ def sqlmap():
         logger.info(f"💉 Starting SQLMap scan: {url}")
         result = execute_command(command)
         logger.info(f"📊 SQLMap scan completed for {url}")
+        
+        memory_meta = maybe_record_scan_memory("sqlmap", url, command, params, result)
+        if memory_meta is not None:
+            result["memory"] = memory_meta
+        
         return jsonify(result)
     except Exception as e:
         logger.error(f"💥 Error in sqlmap endpoint: {str(e)}")
@@ -11767,6 +11784,11 @@ def hydra():
         logger.info(f"🔑 Starting Hydra attack: {target}:{service}")
         result = execute_command(command)
         logger.info(f"📊 Hydra attack completed for {target}")
+        
+        memory_meta = maybe_record_scan_memory("hydra", target, command, params, result)
+        if memory_meta is not None:
+            result["memory"] = memory_meta
+        
         return jsonify(result)
     except Exception as e:
         logger.error(f"💥 Error in hydra endpoint: {str(e)}")
@@ -11835,6 +11857,11 @@ def wpscan():
         logger.info(f"🔍 Starting WPScan: {url}")
         result = execute_command(command)
         logger.info(f"📊 WPScan completed for {url}")
+        
+        memory_meta = maybe_record_scan_memory("wpscan", url, command, params, result)
+        if memory_meta is not None:
+            result["memory"] = memory_meta
+        
         return jsonify(result)
     except Exception as e:
         logger.error(f"💥 Error in wpscan endpoint: {str(e)}")
@@ -11904,6 +11931,11 @@ def ffuf():
         logger.info(f"🔍 Starting FFuf {mode} fuzzing: {url}")
         result = execute_command(command)
         logger.info(f"📊 FFuf fuzzing completed for {url}")
+        
+        memory_meta = maybe_record_scan_memory("ffuf", url, command, params, result)
+        if memory_meta is not None:
+            result["memory"] = memory_meta
+        
         return jsonify(result)
     except Exception as e:
         logger.error(f"💥 Error in ffuf endpoint: {str(e)}")
@@ -13610,6 +13642,11 @@ def arjun():
         logger.info(f"🎯 Starting Arjun parameter discovery: {url}")
         result = execute_command(command)
         logger.info(f"📊 Arjun parameter discovery completed for {url}")
+        
+        memory_meta = maybe_record_scan_memory("arjun", url, command, params, result)
+        if memory_meta is not None:
+            result["memory"] = memory_meta
+        
         return jsonify(result)
     except Exception as e:
         logger.error(f"💥 Error in arjun endpoint: {str(e)}")

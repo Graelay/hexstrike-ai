@@ -2,21 +2,21 @@
 
 <img src="assets/hexstrike-logo.png" alt="HexStrike AI Logo" width="220" style="margin-bottom: 20px;"/>
 
-# HexStrike AI MCP Agents v6.0
+# HexStrike AI MCP Agents v6.0G
 ### AI-Powered MCP Cybersecurity Automation Platform
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Security](https://img.shields.io/badge/Security-Penetration%20Testing-red.svg)](https://github.com/0x4m4/hexstrike-ai)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://github.com/0x4m4/hexstrike-ai)
-[![Version](https://img.shields.io/badge/Version-6.0.0-orange.svg)](https://github.com/0x4m4/hexstrike-ai/releases)
+[![Version](https://img.shields.io/badge/Version-6.0G-orange.svg)](https://github.com/0x4m4/hexstrike-ai/releases)
 [![Tools](https://img.shields.io/badge/Security%20Tools-150%2B-brightgreen.svg)](https://github.com/0x4m4/hexstrike-ai)
 [![Agents](https://img.shields.io/badge/AI%20Agents-12%2B-purple.svg)](https://github.com/0x4m4/hexstrike-ai)
 [![Stars](https://img.shields.io/github/stars/0x4m4/hexstrike-ai?style=social)](https://github.com/0x4m4/hexstrike-ai)
 
 **Advanced AI-powered penetration testing MCP framework with 150+ security tools and 12+ autonomous AI agents**
 
-[📋 What's New](#whats-new-in-v60) • [🏗️ Architecture](#architecture-overview) • [🚀 Installation](#installation) • [🛠️ Features](#features) • [🤖 AI Agents](#ai-agents) • [📡 API Reference](#api-reference)
+[📋 What's New](#whats-new-in-v60g) • [🏗️ Architecture](#architecture-overview) • [🚀 Installation](#installation) • [🛠️ Features](#features) • [🤖 AI Agents](#ai-agents) • [📡 API Reference](#api-reference)
 
 </div>
 
@@ -44,7 +44,7 @@
 
 ## Architecture Overview
 
-HexStrike AI MCP v6.0 features a multi-agent architecture with autonomous AI agents, intelligent decision-making, and vulnerability intelligence.
+HexStrike AI MCP v6.0G features a multi-agent architecture with autonomous AI agents, intelligent decision-making, and vulnerability intelligence.
 
 ```mermaid
 %%{init: {"themeVariables": {
@@ -59,7 +59,7 @@ HexStrike AI MCP v6.0 features a multi-agent architecture with autonomous AI age
   "nodeTextColor": "#fffde7"
 }}}%%
 graph TD
-    A[AI Agent - Claude/GPT/Copilot] -->|MCP Protocol| B[HexStrike MCP Server v6.0]
+    A[AI Agent - Claude/GPT/Copilot] -->|MCP Protocol| B[HexStrike MCP Server v6.0G]
     
     B --> C[Intelligent Decision Engine]
     B --> D[12+ Autonomous AI Agents]
@@ -108,6 +108,23 @@ graph TD
 
 ---
 
+<<<<<<< Updated upstream
+=======
+## What's New in v6.0G
+
+- **RAG Conversation Memory**: persistent, ChromaDB-backed memory for storing scan outputs, vulnerability artifacts, and metadata for semantic retrieval across sessions.
+- MCP Tools for Memory: new MCP endpoints and tools (memory_store, memory_query, memory_stats, memory_history, memory_vulnerabilities) to let agents and clients interact with memory programmatically.
+- Automatic CUDA encoder selection: encoder will auto-detect CUDA-capable GPUs, honor `HEXSTRIKE_CUDA_DEVICE` for multi-GPU setups, and fall back to CPU when incompatible. Use `HEXSTRIKE_ENCODER_DEVICE=cpu` to force CPU.
+- NumPy compatibility shim & dependency guidance: to avoid runtime errors with NumPy 2.x, we recommend `numpy<2.0` when using ChromaDB and sentence-transformers.
+- Telemetry & offline-friendly defaults: chromadb telemetry is disabled by default to avoid noisy PostHog failures in air-gapped environments.
+- Improved logging & graceful degradation: encoder initialization and GPU compatibility issues produce clear, actionable guidance in logs.
+
+These changes are backward-compatible: if `chromadb` or `sentence-transformers` are not installed, the server continues to operate without conversation memory.
+
+---
+
+
+>>>>>>> Stashed changes
 ## Installation
 
 ### Quick Setup to Run the hexstrike MCPs Server
@@ -227,7 +244,7 @@ Edit `~/.config/Claude/claude_desktop_config.json`:
         "--server",
         "http://localhost:8888"
       ],
-      "description": "HexStrike AI v6.0 - Advanced Cybersecurity Automation Platform",
+      "description": "HexStrike AI v6.0G - Advanced Cybersecurity Automation Platform",
       "timeout": 300,
       "disabled": false
     }
@@ -576,7 +593,81 @@ Configure VS Code settings in `.vscode/settings.json`:
 
 ---
 
+<<<<<<< Updated upstream
+=======
+### Conversation Memory Endpoints (RAG)
+
+These endpoints are available when `chromadb` and `sentence-transformers` are installed. If those packages are missing the server will continue to operate but memory endpoints will return a 503 status with an explanatory message.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/memory/health` | GET | Return memory availability, encoder device, and missing dependencies |
+| `/api/memory/stats` | GET | High-level stats: total scans, total vulnerabilities, unique targets |
+| `/api/memory/store` | POST | Store a scan into memory. Body: { target, tool, findings, vulnerabilities, metadata, timestamp (optional) } |
+| `/api/memory/query` | POST | Semantic query over stored scans. Body: { query, limit (optional) } |
+| `/api/memory/history` | GET | Get historical scans for a target: ?target=example.com |
+| `/api/memory/vulnerabilities` | GET | Retrieve vulnerability patterns. Optional `?type=` filter |
+
+Example: store a scan
+
+```json
+POST /api/memory/store
+{
+  "target": "example.com",
+  "tool": "nuclei",
+  "findings": [ { "summary": "Found open /admin" } ],
+  "vulnerabilities": [ { "type": "sqli", "severity": "high", "description": "Blind SQLi" } ],
+  "metadata": { "scan_options": "-t 20" }
+}
+```
+
+Example: query memory
+
+```json
+POST /api/memory/query
+{
+  "query": "recent sql injection findings on example.com",
+  "limit": 5
+}
+```
+
+Environment variables that affect encoder behavior
+
+- `HEXSTRIKE_ENCODER_DEVICE` - set to `cpu` or `cuda` to force behavior. Default: auto-detect.
+- `HEXSTRIKE_CUDA_DEVICE` - integer index for multi-GPU systems (e.g. `0`, `1`). Default: `0` when a GPU is detected.
+- `CHROMADB_DISABLE_TELEMETRY` - defaulted to `1` by the server to prevent posthog telemetry noise.
+
+### Try It: Memory Testing (PowerShell)
+
+Start the server and test memory integration:
+
+```powershell
+# 1. Check memory health
+Invoke-RestMethod http://127.0.0.1:8888/api/memory/health
+
+# 2. Run a quick scan (example: nuclei)
+$scanResult = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8888/api/tools/nuclei -Body (ConvertTo-Json @{
+  target = "example.com"
+  severity = "critical,high"
+}) -ContentType 'application/json'
+
+# 3. Check memory stats (should show 1 scan now)
+Invoke-RestMethod http://127.0.0.1:8888/api/memory/stats
+
+# 4. Query memory semantically
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8888/api/memory/query -Body (ConvertTo-Json @{
+  query = "recent scans example.com"
+  limit = 5
+}) -ContentType 'application/json'
+```
+
+Expected output: `total_scans` increments after each scan, and queries return semantically similar results.
+
+---
+
+>>>>>>> Stashed changes
 ## Usage Examples
+
 When writing your prompt, you generally can't start with just a simple "i want you to penetration test site X.com" as the LLM's are generally setup with some level of ethics. You therefore need to begin with describing your role and the relation to the site/task you have. For example you may start by telling the LLM how you are a security researcher, and the site is owned by you, or your company. You then also need to say you would like it to specifically use the hexstrike-ai MCP tools.
 So a complete example might be:
 ```
@@ -587,7 +678,7 @@ AI Agent: "Thank you for clarifying ownership and intent. To proceed with a pene
 
 ### **Real-World Performance**
 
-| Operation | Traditional Manual | HexStrike v6.0 AI | Improvement |
+| Operation | Traditional Manual | HexStrike v6.0G AI | Improvement |
 |-----------|-------------------|-------------------|-------------|
 | **Subdomain Enumeration** | 2-4 hours | 5-10 minutes | **24x faster** |
 | **Vulnerability Scanning** | 4-8 hours | 15-30 minutes | **16x faster** |
@@ -774,6 +865,6 @@ MIT License - see LICENSE file for details.
 
 **Made with ❤️ by the cybersecurity community for AI-powered security automation**
 
-*HexStrike AI v6.0 - Where artificial intelligence meets cybersecurity excellence*
+*HexStrike AI v6.0G - Where artificial intelligence meets cybersecurity excellence*
 
 </div>
